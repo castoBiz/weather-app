@@ -238,16 +238,233 @@ export const PRESET_CITIES = {
   },
 };
 
-// Helper: Geocoding + live weather fetch via free Open-Meteo API
-export async function fetchLiveWeather(cityName) {
-  const cleanQuery = cityName.trim().toLowerCase();
-  
-  if (PRESET_CITIES[cleanQuery]) {
-    return PRESET_CITIES[cleanQuery];
-  }
+// OpenWeather API Key configuration
+export const OPENWEATHER_API_KEY =
+  import.meta.env?.VITE_OPENWEATHER_API_KEY || "e9b760f04d196ae179690b3d849488e6";
+
+// Map OpenWeather icon codes to our app's icon types
+function mapOpenWeatherIcon(iconCode, weatherId) {
+  if (!iconCode && !weatherId) return "partly-cloudy";
+  if (iconCode === "01d") return "sunny";
+  if (iconCode === "01n") return "clear-night";
+  if (iconCode === "02d" || iconCode === "02n") return "partly-cloudy";
+  if (iconCode === "03d" || iconCode === "03n" || iconCode === "04d" || iconCode === "04n") return "cloudy";
+  if (iconCode === "09d" || iconCode === "09n" || iconCode === "10d" || iconCode === "10n") return "rainy";
+  if (iconCode === "11d" || iconCode === "11n") return "thunderstorm";
+  if (iconCode === "13d" || iconCode === "13n") return "snowy";
+  if (iconCode === "50d" || iconCode === "50n") return "foggy";
+
+  // Weather ID fallback
+  if (weatherId >= 200 && weatherId < 300) return "thunderstorm";
+  if (weatherId >= 300 && weatherId < 600) return "rainy";
+  if (weatherId >= 600 && weatherId < 700) return "snowy";
+  if (weatherId >= 700 && weatherId < 800) return "foggy";
+  if (weatherId === 800) return "sunny";
+  if (weatherId > 800) return "partly-cloudy";
+
+  return "partly-cloudy";
+}
+
+function formatUnixTime(timestamp, timezoneOffset = 0) {
+  if (!timestamp) return "06:30 AM";
+  const date = new Date((timestamp + timezoneOffset) * 1000);
+  return date.toLocaleTimeString("en-US", {
+    timeZone: "UTC",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function getWindDesc(speedKmh) {
+  if (speedKmh < 5) return "Calm Air";
+  if (speedKmh < 15) return "Gentle Coastal Breeze";
+  if (speedKmh < 30) return "Moderate Fresh Wind";
+  if (speedKmh < 50) return "Strong Gusty Wind";
+  return "High Wind Warning";
+}
+
+function getPressureDesc(hPa) {
+  if (hPa > 1020) return "High Pressure System (Stable)";
+  if (hPa < 1005) return "Low Pressure System (Active)";
+  return "Steady & Optimal Pressure";
+}
+
+function getVisibilityDesc(km) {
+  if (km >= 10) return "Crystal Clear Visibility";
+  if (km >= 5) return "Good Visibility";
+  if (km >= 2) return "Moderate Atmospheric Haze";
+  return "Low Visibility Alert";
+}
+
+// Fetch from OpenWeatherMap API
+async function fetchFromOpenWeather(cityName) {
+  if (!OPENWEATHER_API_KEY) return null;
 
   try {
-    // 1. Geocoding
+    // 1. Current Weather
+    const currentRes = await fetch(
+      `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
+        cityName
+      )}&units=metric&appid=${OPENWEATHER_API_KEY}`
+    );
+    if (!currentRes.ok) return null;
+    const currentData = await currentRes.json();
+
+    const { coord, main, weather, wind, visibility, sys, name, timezone } = currentData;
+    const primaryWeather = weather?.[0] || {};
+
+    // 2. 5-Day / 3-Hour Forecast
+    let forecastList = [];
+    try {
+      const forecastRes = await fetch(
+        `https://api.openweathermap.org/data/2.5/forecast?lat=${coord.lat}&lon=${coord.lon}&units=metric&appid=${OPENWEATHER_API_KEY}`
+      );
+      if (forecastRes.ok) {
+        const forecastJson = await forecastRes.json();
+        forecastList = forecastJson.list || [];
+      }
+    } catch {
+      // Forecast optional if fails
+    }
+
+    // 3. Air Quality
+    let aqiScore = 35;
+    let aqiText = "Satisfactory";
+    try {
+      const aqiRes = await fetch(
+        `https://api.openweathermap.org/data/2.5/air_pollution?lat=${coord.lat}&lon=${coord.lon}&appid=${OPENWEATHER_API_KEY}`
+      );
+      if (aqiRes.ok) {
+        const aqiJson = await aqiRes.json();
+        const aqiLevel = aqiJson?.list?.[0]?.main?.aqi || 2;
+        const aqiMap = {
+          1: { score: 25, desc: "Good (Air quality is ideal)" },
+          2: { score: 50, desc: "Fair (Acceptable air quality)" },
+          3: { score: 85, desc: "Moderate (Sensitive groups take care)" },
+          4: { score: 120, desc: "Poor (Unhealthy for sensitive groups)" },
+          5: { score: 180, desc: "Very Poor (Hazardous conditions)" },
+        };
+        aqiScore = aqiMap[aqiLevel]?.score || 35;
+        aqiText = aqiMap[aqiLevel]?.desc || "Satisfactory";
+      }
+    } catch {
+      // AQI optional
+    }
+
+    // Process Hourly (next 6-8 entries from forecast)
+    const hourly = forecastList.slice(0, 8).map((item, idx) => {
+      const d = new Date((item.dt + (timezone || 0)) * 1000);
+      const hourStr = d.toLocaleTimeString("en-US", { timeZone: "UTC", hour: "numeric", hour12: true });
+      const hTempC = Math.round(item.main.temp);
+      const itemWeather = item.weather?.[0] || {};
+      return {
+        time: idx === 0 ? "Now" : hourStr,
+        tempC: hTempC,
+        tempF: Math.round((hTempC * 9) / 5 + 32),
+        icon: mapOpenWeatherIcon(itemWeather.icon, itemWeather.id),
+        pop: Math.round((item.pop || 0) * 100),
+      };
+    });
+
+    // Group forecast by day
+    const dailyMap = {};
+    const daysArr = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const fullDaysArr = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+    forecastList.forEach((item) => {
+      const d = new Date((item.dt + (timezone || 0)) * 1000);
+      const dateKey = d.toISOString().split("T")[0];
+      if (!dailyMap[dateKey]) {
+        dailyMap[dateKey] = {
+          temps: [],
+          weather: item.weather?.[0],
+          pop: item.pop || 0,
+          date: d,
+        };
+      }
+      dailyMap[dateKey].temps.push(item.main.temp);
+      if (item.pop > dailyMap[dateKey].pop) {
+        dailyMap[dateKey].pop = item.pop;
+      }
+    });
+
+    const parsedForecast = Object.keys(dailyMap).slice(0, 7).map((key, idx) => {
+      const dayData = dailyMap[key];
+      const maxC = Math.round(Math.max(...dayData.temps));
+      const minC = Math.round(Math.min(...dayData.temps));
+      const d = dayData.date;
+      const dayIndex = d.getUTCDay();
+      const itemW = dayData.weather || {};
+
+      return {
+        day: idx === 0 ? "Today" : fullDaysArr[dayIndex],
+        shortDay: daysArr[dayIndex],
+        date: d.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric" }),
+        iconType: mapOpenWeatherIcon(itemW.icon, itemW.id),
+        condition: itemW.main || "Clear",
+        maxC,
+        maxF: Math.round((maxC * 9) / 5 + 32),
+        minC,
+        minF: Math.round((minC * 9) / 5 + 32),
+        precip: Math.round(dayData.pop * 100),
+        isToday: idx === 0,
+      };
+    });
+
+    const tempC = Math.round(main.temp);
+    const feelsLikeC = Math.round(main.feels_like);
+    const windSpeedKm = Math.round((wind?.speed || 0) * 3.6);
+    const visKm = Math.round((visibility || 10000) / 1000);
+
+    return {
+      city: name || cityName,
+      country: sys?.country || "",
+      formattedLocation: `${name}${sys?.country ? `, ${sys.country}` : ""}`,
+      tempC,
+      tempF: Math.round((tempC * 9) / 5 + 32),
+      feelsLikeC,
+      feelsLikeF: Math.round((feelsLikeC * 9) / 5 + 32),
+      condition: primaryWeather.main || "Clear",
+      conditionDescription:
+        (primaryWeather.description || "").charAt(0).toUpperCase() +
+        (primaryWeather.description || "Clear skies").slice(1),
+      iconType: mapOpenWeatherIcon(primaryWeather.icon, primaryWeather.id),
+      highC: Math.round(main.temp_max || tempC),
+      highF: Math.round(((main.temp_max || tempC) * 9) / 5 + 32),
+      lowC: Math.round(main.temp_min || tempC),
+      lowF: Math.round(((main.temp_min || tempC) * 9) / 5 + 32),
+      humidity: main.humidity || 60,
+      windSpeedKm,
+      windSpeedMph: Math.round((wind?.speed || 0) * 2.23694),
+      windDirection: getWindDirection(wind?.deg),
+      windDesc: getWindDesc(windSpeedKm),
+      pressure: main.pressure || 1013,
+      pressureDesc: getPressureDesc(main.pressure || 1013),
+      visibilityKm: visKm,
+      visibilityMiles: Math.round((visKm * 0.621371) * 10) / 10,
+      visibilityDesc: getVisibilityDesc(visKm),
+      uvIndex: 6,
+      uvDesc: getUvDescription(6),
+      dewPointC: Math.round(tempC - (100 - (main.humidity || 60)) / 5),
+      dewPointF: Math.round(((tempC - (100 - (main.humidity || 60)) / 5) * 9) / 5 + 32),
+      airQualityIndex: aqiScore,
+      airQualityDesc: aqiText,
+      sunrise: formatUnixTime(sys?.sunrise, timezone),
+      sunset: formatUnixTime(sys?.sunset, timezone),
+      updatedAt: "Updated via OpenWeather",
+      hourly: hourly.length > 0 ? hourly : DEFAULT_WEATHER_DATA.hourly,
+      forecast: parsedForecast.length > 0 ? parsedForecast : DEFAULT_WEATHER_DATA.forecast,
+    };
+  } catch (err) {
+    console.warn("OpenWeather fetch error:", err);
+    return null;
+  }
+}
+
+// Fallback Live Weather Fetch via Open-Meteo
+async function fetchFromOpenMeteo(cityName) {
+  try {
     const geoRes = await fetch(
       `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cityName)}&count=1&language=en&format=json`
     );
@@ -259,7 +476,6 @@ export async function fetchLiveWeather(cityName) {
 
     const { latitude, longitude, name, country, admin1 } = geoData.results[0];
 
-    // 2. Weather Fetch
     const weatherRes = await fetch(
       `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max&hourly=temperature_2m,weather_code,precipitation_probability&timezone=auto`
     );
@@ -350,14 +566,38 @@ export async function fetchLiveWeather(cityName) {
       airQualityDesc: "Satisfactory",
       sunrise: "06:30 AM",
       sunset: "06:45 PM",
-      updatedAt: "Updated just now",
+      updatedAt: "Updated via Open-Meteo",
       hourly: parsedHourly,
       forecast: parsedForecast,
     };
   } catch (error) {
-    console.error("Failed to fetch live weather:", error);
+    console.error("Failed to fetch live weather from Open-Meteo:", error);
     return null;
   }
+}
+
+// Main Weather Fetcher: tries OpenWeatherMap first, falls back to Open-Meteo
+export async function fetchLiveWeather(cityName) {
+  const cleanQuery = cityName.trim().toLowerCase();
+
+  // Try OpenWeatherMap first
+  const openWeatherData = await fetchFromOpenWeather(cityName);
+  if (openWeatherData) {
+    return openWeatherData;
+  }
+
+  // Fallback to Open-Meteo live API
+  const openMeteoData = await fetchFromOpenMeteo(cityName);
+  if (openMeteoData) {
+    return openMeteoData;
+  }
+
+  // Fallback to preset or default data if offline/not found
+  if (PRESET_CITIES[cleanQuery]) {
+    return PRESET_CITIES[cleanQuery];
+  }
+
+  return null;
 }
 
 function parseWmoCode(code, isDay = 1) {
@@ -430,3 +670,4 @@ function getUvDescription(uv) {
   if (uv <= 10) return "Very High Risk";
   return "Extreme Risk";
 }
+
