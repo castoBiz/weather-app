@@ -1,0 +1,28 @@
+{
+  "projectId": "1686576529874190536",
+  "title": "WeatherNow",
+  "designSystem": {
+    "name": "assets/650a5ff0433642b48eea50882f52fb13",
+    "displayName": "Atmospheric Intelligence",
+    "theme": {
+      "colorMode": "LIGHT",
+      "font": "PLUS_JAKARTA_SANS",
+      "roundness": "ROUND_EIGHT",
+      "customColor": "#0284c7"
+    }
+  },
+  "screens": [
+    {
+      "id": "18eee25274954e4f87b5ea88ed679c7d",
+      "title": "WeatherNow Dashboard",
+      "deviceType": "DESKTOP",
+      "status": "COMPLETE"
+    },
+    {
+      "id": "783444782678948100",
+      "title": "DESIGN.md System Specification",
+      "deviceType": "AGNOSTIC",
+      "status": "COMPLETE"
+    }
+  ]
+}
